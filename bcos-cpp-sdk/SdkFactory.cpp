@@ -95,9 +95,15 @@ Service::Ptr SdkFactory::buildService(std::shared_ptr<bcos::boostssl::ws::WsConf
     initializer->setConfig(_config);
     initializer->initWsService(service);
     service->setTimerFactory(timerFactory);
+    // 使用 weak_ptr 避免循环引用导致内存泄漏
+    auto serviceWeakPtr = std::weak_ptr<Service>(service);
+    
     service->registerMsgHandler(bcos::protocol::MessageType::BLOCK_NOTIFY,
-        [service](
+        [serviceWeakPtr](
             std::shared_ptr<boostssl::MessageFace> _msg, std::shared_ptr<WsSession> _session) {
+            auto service = serviceWeakPtr.lock();
+            if (!service) return;
+            
             auto blkMsg = std::string(_msg->payload()->begin(), _msg->payload()->end());
 
             service->onRecvBlockNotifier(blkMsg);
@@ -107,8 +113,11 @@ Service::Ptr SdkFactory::buildService(std::shared_ptr<bcos::boostssl::ws::WsConf
         });
 
     service->registerMsgHandler(bcos::protocol::MessageType::GROUP_NOTIFY,
-        [service](
+        [serviceWeakPtr](
             std::shared_ptr<boostssl::MessageFace> _msg, std::shared_ptr<WsSession> _session) {
+            auto service = serviceWeakPtr.lock();
+            if (!service) return;
+            
             std::string groupInfo = std::string(_msg->payload()->begin(), _msg->payload()->end());
 
             service->onNotifyGroupInfo(groupInfo, _session);
@@ -134,15 +143,25 @@ bcos::cppsdk::jsonrpc::JsonRpcImpl::Ptr SdkFactory::buildJsonRpc(
     BCOS_LOG(INFO) << "[buildJsonRpc]" << LOG_DESC("build json rpc")
                    << LOG_KV("sendRequestToHighestBlockNode", _sendRequestToHighestBlockNode);
 
-    jsonRpc->setSender([_service](const std::string& _group, const std::string& _node,
+    // 使用 weak_ptr 避免循环引用导致内存泄漏
+    auto serviceWeakPtr = std::weak_ptr<Service>(_service);
+    jsonRpc->setSender([serviceWeakPtr](const std::string& _group, const std::string& _node,
                            const std::string& _request, bcos::cppsdk::jsonrpc::RespFunc _respFunc) {
+        auto service = serviceWeakPtr.lock();
+        if (!service) {
+            if (_respFunc) {
+                _respFunc(std::make_shared<Error>(-1, "service has been destroyed"), nullptr);
+            }
+            return;
+        }
+        
         auto data = std::make_shared<bytes>(_request.begin(), _request.end());
-        auto msg = _service->messageFactory()->buildMessage();
-        msg->setSeq(_service->messageFactory()->newSeq());
+        auto msg = service->messageFactory()->buildMessage();
+        msg->setSeq(service->messageFactory()->newSeq());
         msg->setPacketType(bcos::protocol::MessageType::RPC_REQUEST);
         msg->setPayload(data);
 
-        _service->asyncSendMessageByGroupAndNode(_group, _node, msg, Options(),
+        service->asyncSendMessageByGroupAndNode(_group, _node, msg, Options(),
             [_respFunc](Error::Ptr _error, std::shared_ptr<MessageFace> _msg,
                 std::shared_ptr<WsSession> _session) {
                 (void)_session;
